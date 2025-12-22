@@ -69,7 +69,7 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             RSUPHTheme {
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
+                Scaffold(modifier = Modifier.fillMaxSize().safeDrawingPadding()) { innerPadding ->
                     WebViewWrapper(
                         targetUrl = "https://online.rsupermatahati.id",
                         hostUri = "rsupermatahati.id",
