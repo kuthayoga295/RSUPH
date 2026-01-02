@@ -5,33 +5,32 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.DownloadManager
 import android.content.ActivityNotFoundException
+import android.content.Context
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
 import android.os.Message
-import android.provider.MediaStore
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.*
 import android.widget.FrameLayout
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
-import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.core.view.WindowCompat
@@ -40,42 +39,13 @@ import androidx.core.view.WindowInsetsControllerCompat
 import dev.rsuph.id.ui.theme.RSUPHTheme
 
 class MainActivity : ComponentActivity() {
-    private val appPermissions = arrayOf(
-        Manifest.permission.CAMERA,
-        Manifest.permission.RECORD_AUDIO,
-        Manifest.permission.ACCESS_FINE_LOCATION,
-        Manifest.permission.ACCESS_COARSE_LOCATION,
-        Manifest.permission.READ_EXTERNAL_STORAGE,
-        Manifest.permission.WRITE_EXTERNAL_STORAGE
-    )
-
-    private lateinit var permissionLauncher: ActivityResultLauncher<Array<String>>
-
-    private fun hasAllPermissions(): Boolean {
-        return appPermissions.all { perm ->
-            ContextCompat.checkSelfPermission(this, perm) == PackageManager.PERMISSION_GRANTED
-        }
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
-        permissionLauncher = registerForActivityResult(
-            ActivityResultContracts.RequestMultiplePermissions()
-        ) { result -> }
-
-        if (!hasAllPermissions()) {
-            permissionLauncher.launch(appPermissions)
-        }
-
         super.onCreate(savedInstanceState)
-
+        enableEdgeToEdge()
         setContent {
             RSUPHTheme {
-                Scaffold(modifier = Modifier.fillMaxSize().safeDrawingPadding()) { innerPadding ->
-                    WebViewWrapper(
-                        targetUrl = "https://online.rsupermatahati.id",
-                        hostUri = "rsupermatahati.id",
-                        modifier = Modifier.padding(innerPadding)
-                    )
+                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
+                    MainWrapper(modifier = Modifier.fillMaxSize().padding(innerPadding))
                 }
             }
         }
@@ -84,118 +54,74 @@ class MainActivity : ComponentActivity() {
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-fun WebViewWrapper(targetUrl: String, hostUri: String, modifier: Modifier) {
+fun MainWrapper(modifier: Modifier = Modifier) {
+    val targetUrl = "https://online.rsupermatahati.id"
     val context = LocalContext.current
-    val activity = context as ComponentActivity
-    var customView: View? by remember { mutableStateOf(null) }
-    var customViewCallback: WebChromeClient.CustomViewCallback? by remember { mutableStateOf(null) }
-    var filePathCallback by remember { mutableStateOf<ValueCallback<Array<Uri>>?>(null) }
-    var cameraImageUri by remember { mutableStateOf<Uri?>(null) }
+    val activity = context as? Activity ?: return
 
-    val customViewContainer = remember {
-        FrameLayout(context).apply {
+    var customView by remember { mutableStateOf<View?>(null) }
+    var customViewCallback by remember { mutableStateOf<WebChromeClient.CustomViewCallback?>(null) }
+
+    val windowDecorView = remember { activity.window.decorView as FrameLayout }
+    val windowInsetsController = remember {WindowCompat.getInsetsController(activity.window, windowDecorView) }
+
+    var isLoading by remember { mutableStateOf(true) }
+    var progress by remember { mutableFloatStateOf(0f) }
+
+    var pendingPermissionRequest by remember { mutableStateOf<PermissionRequest?>(null) }
+    var pendingGeoCallback by remember { mutableStateOf<GeolocationPermissions.Callback?>(null) }
+    var pendingGeoOrigin by remember { mutableStateOf<String?>(null) }
+
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { results ->
+        val granted = results.values.all { it }
+        pendingPermissionRequest?.let {
+            if (granted) {
+                it.grant(it.resources)
+            } else {
+                it.deny()
+            }
+            pendingPermissionRequest = null
+        }
+        pendingGeoCallback?.let {
+            it.invoke(pendingGeoOrigin, granted, false)
+            pendingGeoCallback = null
+            pendingGeoOrigin = null
+        }
+    }
+
+    var filePathCallback by remember {
+        mutableStateOf<ValueCallback<Array<Uri>>?>(null)
+    }
+
+    val fileChooserLauncher =
+        rememberLauncherForActivityResult(
+            ActivityResultContracts.StartActivityForResult()
+        ) { result ->
+            val callback = filePathCallback ?: return@rememberLauncherForActivityResult
+            val uris =
+                if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+                    WebChromeClient.FileChooserParams.parseResult(
+                        result.resultCode,
+                        result.data
+                    )
+                } else {
+                    null
+                }
+            callback.onReceiveValue(uris)
+            filePathCallback = null
+        }
+
+    val webView = remember {
+        WebView(activity).apply {
+            setLayerType(View.LAYER_TYPE_HARDWARE, null)
+
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
-            visibility = View.GONE
-        }
-    }
-
-    fun createCameraIntent(): Intent {
-        val cameraIntent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
-        val photoUri = activity.contentResolver.insert(
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-            android.content.ContentValues()
-        )
-        cameraImageUri = photoUri
-        cameraIntent.putExtra(MediaStore.EXTRA_OUTPUT, photoUri)
-        return cameraIntent
-    }
-
-    fun createVideoIntent(): Intent {
-        return Intent(MediaStore.ACTION_VIDEO_CAPTURE).apply {
-            putExtra(MediaStore.EXTRA_DURATION_LIMIT, 60)
-            putExtra(MediaStore.EXTRA_VIDEO_QUALITY, 1)
-        }
-    }
-
-    fun createGalleryIntent(): Intent {
-        return Intent(Intent.ACTION_GET_CONTENT).apply {
-            type = "*/*"
-            addCategory(Intent.CATEGORY_OPENABLE)
-            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
-        }
-    }
-
-    val fileChooserLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        val callback = filePathCallback ?: return@rememberLauncherForActivityResult
-        if (result.resultCode == Activity.RESULT_OK) {
-            val data = result.data
-            val uris = mutableListOf<Uri>()
-            if (data?.clipData != null) {
-                val count = data.clipData!!.itemCount
-                for (i in 0 until count) {
-                    uris.add(data.clipData!!.getItemAt(i).uri)
-                }
-            } else if (data?.data != null) {
-                uris.add(data.data!!)
-            } else if (cameraImageUri != null) {
-                uris.add(cameraImageUri!!)
-            }
-
-            if (uris.isNotEmpty()) {
-                callback.onReceiveValue(uris.toTypedArray())
-            } else {
-                callback.onReceiveValue(null)
-            }
-        } else {
-            callback.onReceiveValue(null)
-        }
-        filePathCallback = null
-        cameraImageUri = null
-    }
-
-    fun requestLocationPermission() {
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION)
-            != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(
-                activity,
-                arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION),
-                1234
-            )
-        }
-    }
-
-    fun hideSystemBars() {
-        val window = activity.window
-        WindowCompat.setDecorFitsSystemWindows(window, false)
-        val controller = WindowInsetsControllerCompat(window, window.decorView)
-        controller.hide(WindowInsetsCompat.Type.systemBars())
-        controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-    }
-
-    fun showSystemBars() {
-        val window = activity.window
-        WindowCompat.setDecorFitsSystemWindows(window, true)
-        val controller = WindowInsetsControllerCompat(window, window.decorView)
-        controller.show(WindowInsetsCompat.Type.systemBars())
-    }
-
-    val webView = remember {
-        WebView(context).apply {
-
-            setLayerType(View.LAYER_TYPE_HARDWARE, null)
 
             CookieManager.getInstance().setAcceptCookie(true)
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-
-            layoutParams = ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
 
             settings.apply {
                 javaScriptEnabled = true
@@ -221,55 +147,121 @@ fun WebViewWrapper(targetUrl: String, hostUri: String, modifier: Modifier) {
                 userAgentString = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36"
             }
 
+            setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
+                try {
+                    val request = DownloadManager.Request(url.toUri())
+                    val fileName = URLUtil.guessFileName(url, contentDisposition, mimeType)
+                    request.setTitle(fileName)
+                    request.setDescription("Downloading file…")
+                    request.setMimeType(mimeType)
+                    request.addRequestHeader("User-Agent", userAgent)
+                    request.setNotificationVisibility(
+                        DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED
+                    )
+                    request.setDestinationInExternalFilesDir(
+                        context,
+                        Environment.DIRECTORY_DOWNLOADS,
+                        fileName
+                    )
+                    val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+                    dm.enqueue(request)
+                } catch (_: Exception) {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, url.toUri()))
+                }
+            }
+
             webViewClient = object : WebViewClient() {
-                override fun shouldOverrideUrlLoading(
-                    view: WebView,
-                    request: WebResourceRequest
-                ): Boolean {
-                    val url = request.url.toString()
-                    val uri = Uri.parse(url)
-                    if (uri.host == hostUri) {
-                        return false
-                    }
-                    if (url.startsWith("http://") || url.startsWith("https://")) {
-                        return false
-                    }
-                    if (url.startsWith("intent://")) {
-                        return try {
-                            val intent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME)
+                override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                    isLoading = true
+                }
+
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    isLoading = false
+                }
+
+                override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                    val webView = view ?: return false
+                    val uri = request?.url ?: return false
+                    if (uri.scheme == "intent") {
+                        try {
+                            val intent = Intent.parseUri(uri.toString(), Intent.URI_INTENT_SCHEME)
                             activity.startActivity(intent)
-                            true
-                        } catch (e: Exception) {
-                            try {
-                                val packageName =
-                                    Intent.parseUri(url, Intent.URI_INTENT_SCHEME).`package`
-                                if (!packageName.isNullOrEmpty()) {
-                                    activity.startActivity(
-                                        Intent(
-                                            Intent.ACTION_VIEW,
-                                            "market://details?id=$packageName".toUri()
-                                        )
-                                    )
-                                    true
-                                } else false
-                            } catch (_: Exception) {
-                                false
+                        } catch (_: ActivityNotFoundException) {
+                            val fallback = uri.getQueryParameter("browser_fallback_url")
+                            if (!fallback.isNullOrEmpty()) {
+                                activity.startActivity(
+                                    Intent(Intent.ACTION_VIEW, fallback.toUri())
+                                )
                             }
+                        }
+                        return true
+                    }
+                    val host = uri.host
+                    val targetHost = targetUrl.toUri().host
+                    if (!host.isNullOrEmpty() && !targetHost.isNullOrEmpty() && (host == targetHost || host.endsWith(".$targetHost"))) {
+                        return false
+                    }
+                    if (uri.scheme == "http" || uri.scheme == "https") {
+                        return try {
+                            webView.context.startActivity(
+                                Intent(Intent.ACTION_VIEW, uri)
+                            )
+                            true
+                        } catch (_: Exception) {
+                            false
                         }
                     }
                     return try {
-                        val intent = Intent(Intent.ACTION_VIEW, url.toUri())
-                        activity.startActivity(intent)
+                        webView.context.startActivity(
+                            Intent(Intent.ACTION_VIEW, uri)
+                        )
                         true
-                    } catch (_: ActivityNotFoundException) {
+                    } catch (_: Exception) {
                         false
                     }
                 }
             }
 
             webChromeClient = object : WebChromeClient() {
-                override fun onPermissionRequest(request: PermissionRequest?) {
-                    request?.grant(request.resources)
+                override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                    progress = newProgress / 100f
+                }
+
+                override fun onPermissionRequest(request: PermissionRequest) {
+                    val permissions = mutableListOf<String>()
+                    request.resources.forEach {
+                        when (it) {
+                            PermissionRequest.RESOURCE_VIDEO_CAPTURE ->
+                                permissions.add(Manifest.permission.CAMERA)
+
+                            PermissionRequest.RESOURCE_AUDIO_CAPTURE ->
+                                permissions.add(Manifest.permission.RECORD_AUDIO)
+                        }
+                    }
+                    val missing = permissions.filter {
+                        ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
+                    }
+                    if (missing.isEmpty()) {
+                        request.grant(request.resources)
+                    } else {
+                        pendingPermissionRequest = request
+                        permissionLauncher.launch(missing.toTypedArray())
+                    }
+                }
+
+                override fun onGeolocationPermissionsShowPrompt(origin: String, callback: GeolocationPermissions.Callback) {
+                    if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                        callback.invoke(origin, true, false)
+                    } else {
+                        pendingGeoOrigin = origin
+                        pendingGeoCallback = callback
+                        permissionLauncher.launch(
+                            arrayOf(
+                                Manifest.permission.ACCESS_FINE_LOCATION,
+                                Manifest.permission.ACCESS_COARSE_LOCATION
+                            )
+                        )
+                    }
                 }
 
                 override fun onCreateWindow(
@@ -278,149 +270,82 @@ fun WebViewWrapper(targetUrl: String, hostUri: String, modifier: Modifier) {
                     isUserGesture: Boolean,
                     resultMsg: Message?
                 ): Boolean {
-                    val newWebView = WebView(context).apply {
-                        settings.javaScriptEnabled = true
-                    }
-                    val transport = resultMsg?.obj as? WebView.WebViewTransport
-                    transport?.webView = newWebView
-                    resultMsg?.sendToTarget()
-                    return true
+                    val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
+                    transport.webView = view
+                    resultMsg.sendToTarget()
+                    return false
                 }
 
                 override fun onShowFileChooser(
                     webView: WebView?,
-                    filePathCallBack: ValueCallback<Array<Uri>>?,
+                    callback: ValueCallback<Array<Uri>>?,
                     fileChooserParams: FileChooserParams?
                 ): Boolean {
-                    filePathCallback = filePathCallBack
-                    val hasCameraPermission = ContextCompat.checkSelfPermission(
-                        context,
-                        Manifest.permission.CAMERA
-                    ) == PackageManager.PERMISSION_GRANTED
-                    val cameraIntent = if (hasCameraPermission) createCameraIntent() else null
-                    val videoIntent = if (hasCameraPermission) createVideoIntent() else null
-                    val galleryIntent = createGalleryIntent()
-                    val intentList = mutableListOf<Intent>()
-                    cameraIntent?.let { intentList.add(it) }
-                    videoIntent?.let { intentList.add(it) }
-                    val chooser = Intent(Intent.ACTION_CHOOSER).apply {
-                        putExtra(Intent.EXTRA_INTENT, galleryIntent)
-                        putExtra(Intent.EXTRA_INITIAL_INTENTS, intentList.toTypedArray())
-                    }
-                    fileChooserLauncher.launch(chooser)
+                    filePathCallback?.onReceiveValue(null)
+                    filePathCallback = callback
+                    val intent = fileChooserParams?.createIntent() ?: return false
+                    fileChooserLauncher.launch(intent)
                     return true
                 }
 
-                override fun onGeolocationPermissionsShowPrompt(
-                    origin: String?,
-                    callback: GeolocationPermissions.Callback?
-                ) {
-                    requestLocationPermission()
-                    callback?.invoke(origin, true, false)
-                }
-
-                override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
+                override fun onShowCustomView(view: View, callback: CustomViewCallback) {
                     if (customView != null) {
-                        onHideCustomView()
+                        callback.onCustomViewHidden()
                         return
                     }
                     customView = view
                     customViewCallback = callback
-                    customViewContainer.addView(
-                        customView,
-                        FrameLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT
-                        )
-                    )
-                    customViewContainer.visibility = View.VISIBLE
-                    hideSystemBars()
+                    windowInsetsController.hide(WindowInsetsCompat.Type.systemBars())
+                    windowInsetsController.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                    windowDecorView.addView(view, FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
+                    ))
+                    activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
                 }
 
                 override fun onHideCustomView() {
-                    customViewContainer.visibility = View.GONE
-                    customView?.let { customViewContainer.removeView(it) }
-                    customView = null
-                    customViewCallback?.onCustomViewHidden()
-                    customViewCallback = null
-                    showSystemBars()
-                }
-            }
-
-            setDownloadListener { url, userAgent, contentDisposition, mimeType, contentLength ->
-                try {
-                    val request = DownloadManager.Request(url.toUri())
-                    val fileName = URLUtil.guessFileName(url, contentDisposition, mimeType)
-                    request.setMimeType(mimeType)
-                    request.addRequestHeader("User-Agent", userAgent)
-                    request.setDescription("Downloading file…")
-                    request.setTitle(fileName)
-                    request.setNotificationVisibility(
-                        DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED
-                    )
-                    request.setAllowedOverMetered(true)
-                    request.setAllowedOverRoaming(true)
-                    request.setDestinationInExternalPublicDir(
-                        Environment.DIRECTORY_DOWNLOADS,
-                        fileName
-                    )
-                    val dm = context.getSystemService(DownloadManager::class.java)
-                    dm.enqueue(request)
-                    Toast.makeText(context, "Downloading...", Toast.LENGTH_SHORT).show()
-                } catch (e: Exception) {
-                    try {
-                        val browserIntent = Intent(Intent.ACTION_VIEW, url.toUri())
-                        browserIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        context.startActivity(browserIntent)
-                        Toast.makeText(context, "Open in external browser…", Toast.LENGTH_SHORT).show()
-                    } catch (ex: Exception) {
-                        Toast.makeText(context, "Download failed!", Toast.LENGTH_SHORT).show()
+                    customView?.let {
+                        windowDecorView.removeView(it)
+                        customView = null
                     }
+                    customViewCallback?.onCustomViewHidden()
+                    windowInsetsController.show(WindowInsetsCompat.Type.systemBars())
+                    activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
                 }
             }
+            loadUrl(targetUrl)
         }
     }
 
-    AndroidView(
-        modifier = Modifier.fillMaxSize(),
-        factory = {
-            FrameLayout(context).apply {
-                addView(
-                    webView,
-                    FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT
-                    )
-                )
-                addView(
-                    customViewContainer,
-                    FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT
-                    )
-                )
-            }
-        },
-        update = { webView.loadUrl(targetUrl) }
-    )
+    Box(modifier) {
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { webView }
+        )
+        if (isLoading && customView == null) {
+            LinearProgressIndicator(
+                progress = { progress },
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+    }
 
     DisposableEffect(Unit) {
         onDispose {
-            try {
-                webView.apply {
-                    loadUrl("about:blank")
-                    stopLoading()
-                    clearHistory()
-                    removeAllViews()
-                    destroy()
-                }
-            } catch (e: Exception) {
+            webView.apply {
+                stopLoading()
+                destroy()
             }
         }
     }
 
     BackHandler(enabled = true) {
-        if (webView.canGoBack()) webView.goBack()
-        else activity.finish()
+        if (customView != null) {
+            customViewCallback?.onCustomViewHidden()
+        } else if (webView.canGoBack()) {
+            webView.goBack()
+        } else {
+            activity.finish()
+        }
     }
 }
