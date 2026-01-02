@@ -113,8 +113,6 @@ fun MainWrapper(modifier: Modifier = Modifier) {
 
     val webView = remember {
         WebView(activity).apply {
-            setLayerType(View.LAYER_TYPE_HARDWARE, null)
-
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
@@ -144,7 +142,15 @@ fun MainWrapper(modifier: Modifier = Modifier) {
                 scrollBarStyle = View.SCROLLBARS_INSIDE_OVERLAY
                 setGeolocationEnabled(true)
                 blockNetworkLoads = false
-                userAgentString = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36"
+
+                userAgentString = userAgentString
+                    .replace("; wv", "")
+                    .replace("; )", ")")
+                    .replace(" )", ")")
+                    .replace("(;", "(")
+                    .replace("( ", "(")
+                    .replace(Regex("\\s{2,}"), " ")
+                    .trim()
             }
 
             setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
@@ -158,8 +164,7 @@ fun MainWrapper(modifier: Modifier = Modifier) {
                     request.setNotificationVisibility(
                         DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED
                     )
-                    request.setDestinationInExternalFilesDir(
-                        context,
+                    request.setDestinationInExternalPublicDir(
                         Environment.DIRECTORY_DOWNLOADS,
                         fileName
                     )
@@ -270,10 +275,14 @@ fun MainWrapper(modifier: Modifier = Modifier) {
                     isUserGesture: Boolean,
                     resultMsg: Message?
                 ): Boolean {
-                    val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
-                    transport.webView = view
+                    val newWebView = WebView(view!!.context).apply {
+                        settings.javaScriptEnabled = true
+                        webViewClient = view.webViewClient
+                    }
+                    val transport = resultMsg?.obj as WebView.WebViewTransport
+                    transport.webView = newWebView
                     resultMsg.sendToTarget()
-                    return false
+                    return true
                 }
 
                 override fun onShowFileChooser(
@@ -313,7 +322,21 @@ fun MainWrapper(modifier: Modifier = Modifier) {
                     activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
                 }
             }
-            loadUrl(targetUrl)
+        }
+    }
+
+    LaunchedEffect(webView) {
+        webView.loadUrl(targetUrl)
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            webView.apply {
+                stopLoading()
+                loadUrl("about:blank")
+                removeAllViews()
+                destroy()
+            }
         }
     }
 
@@ -327,15 +350,6 @@ fun MainWrapper(modifier: Modifier = Modifier) {
                 progress = { progress },
                 modifier = Modifier.fillMaxWidth()
             )
-        }
-    }
-
-    DisposableEffect(Unit) {
-        onDispose {
-            webView.apply {
-                stopLoading()
-                destroy()
-            }
         }
     }
 
